@@ -1,43 +1,80 @@
 import { NextRequest, NextResponse } from "next/server";
-import { WeatherData } from "../../../types/weather";
+import WeatherService from "../../../lib/weather-service";
+import { logger } from "../../../lib/logger";
+import { WeatherAPIError, ValidationError, NetworkError } from "../../../lib/errors";
+import { HTTP_STATUS, ERROR_MESSAGES } from "../../../lib/constants";
 
+/**
+ * GET /api/weather
+ * Fetches current weather data for a given city
+ * 
+ * Query parameters:
+ * - city: string (required) - City name to fetch weather for
+ * 
+ * Returns:
+ * - 200: Weather data
+ * - 400: Invalid city parameter or city not found
+ * - 500: Server error
+ */
 export async function GET(req: NextRequest) {
+  const startTime = Date.now();
   const searchParams = req.nextUrl.searchParams;
   const city = searchParams.get("city");
 
   if (!city) {
+    logger.warn("Weather API called without city parameter");
     return NextResponse.json(
-      { error: "City parameter is required" },
-      { status: 400 }
+      { error: ERROR_MESSAGES.CITY_REQUIRED },
+      { status: HTTP_STATUS.BAD_REQUEST }
     );
   }
 
   try {
-    // Using WeatherAPI.com
     const apiKey = process.env.WEATHER_API_KEY || "1bec88bba1934004919140951260601";
+    const weatherService = new WeatherService({ apiKey });
     
-    const response = await fetch(
-      `https://api.weatherapi.com/v1/current.json?key=${apiKey}&q=${encodeURIComponent(city)}&aqi=no`
-    );
+    const weatherData = await weatherService.fetchWeather(city);
+    
+    const duration = Date.now() - startTime;
+    logger.info("Weather API request completed", {
+      city,
+      duration: `${duration}ms`,
+      status: HTTP_STATUS.OK,
+    });
 
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}));
-      if (response.status === 400) {
-        return NextResponse.json(
-          { error: errorData.error?.message || "City not found" },
-          { status: 400 }
-        );
-      }
-      throw new Error(`Weather API error: ${response.statusText}`);
+    return NextResponse.json(weatherData, { status: HTTP_STATUS.OK });
+  } catch (error) {
+    const duration = Date.now() - startTime;
+    
+    if (error instanceof ValidationError) {
+      logger.warn("Validation error in weather API", { city, error: error.message, duration: `${duration}ms` });
+      return NextResponse.json(
+        { error: error.message },
+        { status: HTTP_STATUS.BAD_REQUEST }
+      );
     }
 
-    const data: WeatherData = await response.json();
-    return NextResponse.json(data);
-  } catch (error) {
-    console.error("Error fetching weather:", error);
+    if (error instanceof WeatherAPIError) {
+      logger.error("Weather API error", error, { city, duration: `${duration}ms` });
+      return NextResponse.json(
+        { error: error.message },
+        { status: error.statusCode || HTTP_STATUS.INTERNAL_SERVER_ERROR }
+      );
+    }
+
+    if (error instanceof NetworkError) {
+      logger.error("Network error in weather API", error, { city, duration: `${duration}ms` });
+      return NextResponse.json(
+        { error: error.message },
+        { status: HTTP_STATUS.INTERNAL_SERVER_ERROR }
+      );
+    }
+
+    // Unknown error
+    logger.error("Unexpected error in weather API", error, { city, duration: `${duration}ms` });
     return NextResponse.json(
-      { error: "Failed to fetch weather data" },
-      { status: 500 }
+      { error: ERROR_MESSAGES.UNKNOWN_ERROR },
+      { status: HTTP_STATUS.INTERNAL_SERVER_ERROR }
     );
   }
 }
